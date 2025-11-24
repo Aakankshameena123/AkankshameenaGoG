@@ -1,48 +1,14 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
-
-/**
- * @title LiquidLoop Finance
- * @dev A decentralized liquidity pool platform with automated yield generation
- */
-contract LiquidLoopFinance {
-    
-    // State variables
+State variables
     address public owner;
     uint256 public totalLiquidity;
-    uint256 public rewardRate; // Reward rate in basis points (100 = 1%)
-    
-    struct LiquidityProvider {
-        uint256 amount;
-        uint256 depositTime;
-        uint256 rewardsEarned;
-        bool isActive;
-    }
-    
-    mapping(address => LiquidityProvider) public providers;
-    address[] public providerAddresses;
-    
-    // Events
+    uint256 public rewardRate; Events
     event LiquidityAdded(address indexed provider, uint256 amount, uint256 timestamp);
     event LiquidityRemoved(address indexed provider, uint256 amount, uint256 timestamp);
     event RewardsClaimed(address indexed provider, uint256 reward, uint256 timestamp);
     event RewardRateUpdated(uint256 newRate, uint256 timestamp);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     
-    // Modifiers
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner can call this function");
-        _;
-    }
-    
-    modifier hasLiquidity() {
-        require(providers[msg.sender].isActive, "No active liquidity position");
-        _;
-    }
-    
-    constructor() {
-        owner = msg.sender;
-        rewardRate = 500; // 5% default reward rate
+    5% default reward rate
     }
     
     /**
@@ -54,13 +20,7 @@ contract LiquidLoopFinance {
         
         LiquidityProvider storage provider = providers[msg.sender];
         
-        // If new provider, add to array
-        if (!provider.isActive) {
-            providerAddresses.push(msg.sender);
-            provider.isActive = true;
-            provider.depositTime = block.timestamp;
-        } else {
-            // Claim existing rewards before adding more liquidity
+        Claim existing rewards before adding more liquidity
             uint256 pendingRewards = calculateRewards(msg.sender);
             provider.rewardsEarned += pendingRewards;
         }
@@ -80,11 +40,7 @@ contract LiquidLoopFinance {
         LiquidityProvider storage provider = providers[msg.sender];
         require(amount > 0 && amount <= provider.amount, "Invalid withdrawal amount");
         
-        // Calculate and add pending rewards
-        uint256 pendingRewards = calculateRewards(msg.sender);
-        provider.rewardsEarned += pendingRewards;
-        
-        // Update provider state
+        Update provider state
         provider.amount -= amount;
         totalLiquidity -= amount;
         
@@ -94,31 +50,14 @@ contract LiquidLoopFinance {
         
         provider.depositTime = block.timestamp;
         
-        // Transfer liquidity back to provider
-        payable(msg.sender).transfer(amount);
-        
-        emit LiquidityRemoved(msg.sender, amount, block.timestamp);
-    }
-    
-    /**
-     * @dev Function 3: Claim accumulated rewards
-     * Users can claim their earned rewards without removing liquidity
-     */
-    function claimRewards() external hasLiquidity {
-        LiquidityProvider storage provider = providers[msg.sender];
-        
-        // Calculate total rewards
+        Calculate total rewards
         uint256 pendingRewards = calculateRewards(msg.sender);
         uint256 totalRewards = provider.rewardsEarned + pendingRewards;
         
         require(totalRewards > 0, "No rewards to claim");
         require(address(this).balance >= totalRewards, "Insufficient contract balance");
         
-        // Reset rewards and update deposit time
-        provider.rewardsEarned = 0;
-        provider.depositTime = block.timestamp;
-        
-        // Transfer rewards
+        Transfer rewards
         payable(msg.sender).transfer(totalRewards);
         
         emit RewardsClaimed(msg.sender, totalRewards, block.timestamp);
@@ -146,13 +85,7 @@ contract LiquidLoopFinance {
      * Allows the contract owner to adjust the annual reward rate
      */
     function updateRewardRate(uint256 newRate) external onlyOwner {
-        require(newRate > 0 && newRate <= 10000, "Invalid reward rate"); // Max 100%
-        rewardRate = newRate;
-        
-        emit RewardRateUpdated(newRate, block.timestamp);
-    }
-    
-    // Additional utility functions
+        require(newRate > 0 && newRate <= 10000, "Invalid reward rate"); Additional utility functions
     
     /**
      * @dev Get provider details
@@ -199,3 +132,6 @@ contract LiquidLoopFinance {
         totalLiquidity += msg.value;
     }
 }
+// 
+End
+// 
