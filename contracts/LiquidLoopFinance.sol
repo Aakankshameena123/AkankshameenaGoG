@@ -1,137 +1,217 @@
-State variables
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.21;
+
+/**
+ * @title LiquidLoop Finance
+ * @notice A leverage-loop lending + auto-compounding protocol.
+ * @dev This is a template. Requires price feeds, audits, robust liquidation logic.
+ */
+
+interface IERC20 {
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
+}
+
+interface IPriceOracle {
+    function getPrice(address asset) external view returns (uint256); // 1e8 decimals
+}
+
+contract LiquidLoopFinance {
+    // -------------------------------------------------------
+    // STRUCTS
+    // -------------------------------------------------------
+    struct Position {
+        uint256 collateral;
+        uint256 debt;
+        uint256 loopCount;
+        bool exists;
+    }
+
+    // -------------------------------------------------------
+    // STATE
+    // -------------------------------------------------------
+    IERC20 public immutable collateralToken; // e.g., WETH
+    IERC20 public immutable stableToken;     // e.g., USDC/DAI
+
+    IPriceOracle public oracle;
+
+    uint256 public constant MAX_LOAN_TO_VALUE = 70_000;  // 70% LTV (scaled 1e5)
+    uint256 public constant LIQUIDATION_THRESHOLD = 80_000; // 80%
+    uint256 public constant PRECISION = 1e5;
+
+    mapping(address => Position) public positions;
+
     address public owner;
-    uint256 public totalLiquidity;
-    uint256 public rewardRate; Events
-    event LiquidityAdded(address indexed provider, uint256 amount, uint256 timestamp);
-    event LiquidityRemoved(address indexed provider, uint256 amount, uint256 timestamp);
-    event RewardsClaimed(address indexed provider, uint256 reward, uint256 timestamp);
-    event RewardRateUpdated(uint256 newRate, uint256 timestamp);
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-    
-    5% default reward rate
+
+    // -------------------------------------------------------
+    // EVENTS
+    // -------------------------------------------------------
+    event LoopOpened(address indexed user, uint256 collateral, uint256 loops);
+    event LoopExpanded(address indexed user, uint256 newCollateral, uint256 loopsAdded);
+    event LoopUnwound(address indexed user, uint256 returnedCollateral);
+    event Liquidated(address indexed user, uint256 burnedCollateral, uint256 repaidDebt);
+    event OracleUpdated(address newOracle);
+
+    // -------------------------------------------------------
+    // MODIFIERS
+    // -------------------------------------------------------
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
     }
-    
-    /**
-     * @dev Function 1: Add liquidity to the pool
-     * Users can deposit ETH to become liquidity providers
-     */
-    function addLiquidity() external payable {
-        require(msg.value > 0, "Must send ETH to add liquidity");
-        
-        LiquidityProvider storage provider = providers[msg.sender];
-        
-        Claim existing rewards before adding more liquidity
-            uint256 pendingRewards = calculateRewards(msg.sender);
-            provider.rewardsEarned += pendingRewards;
+
+    modifier positionExists() {
+        require(positions[msg.sender].exists, "No position");
+        _;
+    }
+
+    // -------------------------------------------------------
+    // CONSTRUCTOR
+    // -------------------------------------------------------
+    constructor(address _collateral, address _stable, address _oracle) {
+        collateralToken = IERC20(_collateral);
+        stableToken = IERC20(_stable);
+        oracle = IPriceOracle(_oracle);
+        owner = msg.sender;
+    }
+
+    // -------------------------------------------------------
+    // INTERNAL HELPERS
+    // -------------------------------------------------------
+    function _getCollateralValue(uint256 amount) internal view returns (uint256) {
+        // Collateral token price in stableToken units
+        uint256 price = oracle.getPrice(address(collateralToken));
+        return (amount * price) / 1e8;
+    }
+
+    function _maxBorrow(uint256 collateralAmount) internal view returns (uint256) {
+        uint256 collateralValue = _getCollateralValue(collateralAmount);
+        return (collateralValue * MAX_LOAN_TO_VALUE) / PRECISION;
+    }
+
+    function _healthFactor(address user) public view returns (uint256) {
+        Position memory p = positions[user];
+        if (p.debt == 0) return type(uint256).max;
+
+        uint256 collateralValue = _getCollateralValue(p.collateral);
+        return (collateralValue * PRECISION) / p.debt;
+    }
+
+    // -------------------------------------------------------
+    // CORE: CREATE LEVERAGE LOOP
+    // -------------------------------------------------------
+    function openLoop(uint256 collateralAmount, uint256 loops) external {
+        require(!positions[msg.sender].exists, "Already exists");
+        require(loops > 0 && loops <= 10, "Loops too high");
+
+        // Transfer user collateral
+        collateralToken.transferFrom(msg.sender, address(this), collateralAmount);
+
+        uint256 currentCollateral = collateralAmount;
+        uint256 totalDebt = 0;
+
+        // Main leverage loop
+        for (uint256 i = 0; i < loops; i++) {
+            uint256 borrowable = _maxBorrow(currentCollateral) - totalDebt;
+            if (borrowable == 0) break;
+
+            // Borrow stablecoins (mint in template)
+            stableToken.transfer(msg.sender, 0); // placeholder for real lending pool
+            totalDebt += borrowable;
+
+            // Buy more collateral with borrowed stablecoins
+            // *DEX logic not included; assume swap executed offchain*
+            uint256 extraCollateral = borrowable / 2; // placeholder conversion rate
+
+            currentCollateral += extraCollateral;
         }
-        
-        provider.amount += msg.value;
-        provider.depositTime = block.timestamp;
-        totalLiquidity += msg.value;
-        
-        emit LiquidityAdded(msg.sender, msg.value, block.timestamp);
+
+        positions[msg.sender] = Position({
+            collateral: currentCollateral,
+            debt: totalDebt,
+            loopCount: loops,
+            exists: true
+        });
+
+        emit LoopOpened(msg.sender, currentCollateral, loops);
     }
-    
-    /**
-     * @dev Function 2: Remove liquidity from the pool
-     * Users can withdraw their deposited ETH along with earned rewards
-     */
-    function removeLiquidity(uint256 amount) external hasLiquidity {
-        LiquidityProvider storage provider = providers[msg.sender];
-        require(amount > 0 && amount <= provider.amount, "Invalid withdrawal amount");
-        
-        Update provider state
-        provider.amount -= amount;
-        totalLiquidity -= amount;
-        
-        if (provider.amount == 0) {
-            provider.isActive = false;
+
+    // -------------------------------------------------------
+    // EXPAND LOOP
+    // -------------------------------------------------------
+    function boostLoop(uint256 extraCollateral, uint256 moreLoops) external positionExists {
+        require(moreLoops > 0 && moreLoops <= 10, "Bad loops");
+
+        collateralToken.transferFrom(msg.sender, address(this), extraCollateral);
+
+        Position storage p = positions[msg.sender];
+        p.collateral += extraCollateral;
+
+        uint256 totalDebt = p.debt;
+
+        // additional looping
+        for (uint256 i = 0; i < moreLoops; i++) {
+            uint256 borrowable = _maxBorrow(p.collateral) - totalDebt;
+            if (borrowable == 0) break;
+
+            totalDebt += borrowable;
+
+            uint256 extraCol = borrowable / 2; // placeholder
+            p.collateral += extraCol;
         }
-        
-        provider.depositTime = block.timestamp;
-        
-        Calculate total rewards
-        uint256 pendingRewards = calculateRewards(msg.sender);
-        uint256 totalRewards = provider.rewardsEarned + pendingRewards;
-        
-        require(totalRewards > 0, "No rewards to claim");
-        require(address(this).balance >= totalRewards, "Insufficient contract balance");
-        
-        Transfer rewards
-        payable(msg.sender).transfer(totalRewards);
-        
-        emit RewardsClaimed(msg.sender, totalRewards, block.timestamp);
+
+        p.debt = totalDebt;
+        p.loopCount += moreLoops;
+
+        emit LoopExpanded(msg.sender, p.collateral, moreLoops);
     }
-    
-    /**
-     * @dev Function 4: Calculate pending rewards for a provider
-     * Returns the amount of rewards earned based on time and reward rate
-     */
-    function calculateRewards(address providerAddress) public view returns (uint256) {
-        LiquidityProvider memory provider = providers[providerAddress];
-        
-        if (!provider.isActive || provider.amount == 0) {
-            return 0;
-        }
-        
-        uint256 timeElapsed = block.timestamp - provider.depositTime;
-        uint256 rewards = (provider.amount * rewardRate * timeElapsed) / (365 days * 10000);
-        
-        return rewards;
+
+    // -------------------------------------------------------
+    // EXIT LOOP
+    // -------------------------------------------------------
+    function unwindLoop() external positionExists {
+        Position memory p = positions[msg.sender];
+
+        // Repay debt (assume repaid separately)
+        // Return collateral to user
+        collateralToken.transfer(msg.sender, p.collateral);
+
+        delete positions[msg.sender];
+
+        emit LoopUnwound(msg.sender, p.collateral);
     }
-    
-    /**
-     * @dev Function 5: Update reward rate (only owner)
-     * Allows the contract owner to adjust the annual reward rate
-     */
-    function updateRewardRate(uint256 newRate) external onlyOwner {
-        require(newRate > 0 && newRate <= 10000, "Invalid reward rate"); Additional utility functions
-    
-    /**
-     * @dev Get provider details
-     */
-    function getProviderInfo(address providerAddress) external view returns (
-        uint256 amount,
-        uint256 depositTime,
-        uint256 rewardsEarned,
-        uint256 pendingRewards,
-        bool isActive
-    ) {
-        LiquidityProvider memory provider = providers[providerAddress];
-        return (
-            provider.amount,
-            provider.depositTime,
-            provider.rewardsEarned,
-            calculateRewards(providerAddress),
-            provider.isActive
-        );
+
+    // -------------------------------------------------------
+    // LIQUIDATION
+    // -------------------------------------------------------
+    function liquidate(address user) external {
+        require(_healthFactor(user) < LIQUIDATION_THRESHOLD, "Healthy");
+
+        Position memory p = positions[user];
+        require(p.exists, "No position");
+
+        uint256 seizeCollateral = (p.collateral * 90_000) / PRECISION; // 90% collateral
+        uint256 repayDebt = p.debt;
+
+        // Liquidator receives bonus collateral
+        collateralToken.transfer(msg.sender, seizeCollateral);
+
+        // Treasury takes the rest
+        uint256 leftover = p.collateral - seizeCollateral;
+        collateralToken.transfer(owner, leftover);
+
+        delete positions[user];
+
+        emit Liquidated(user, seizeCollateral, repayDebt);
     }
-    
-    /**
-     * @dev Get total number of liquidity providers
-     */
-    function getProviderCount() external view returns (uint256) {
-        return providerAddresses.length;
-    }
-    
-    /**
-     * @dev Transfer ownership
-     */
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Invalid new owner address");
-        address previousOwner = owner;
-        owner = newOwner;
-        
-        emit OwnershipTransferred(previousOwner, newOwner);
-    }
-    
-    /**
-     * @dev Receive function to accept ETH
-     */
-    receive() external payable {
-        totalLiquidity += msg.value;
+
+    // -------------------------------------------------------
+    // ADMIN
+    // -------------------------------------------------------
+    function updateOracle(address newOracle) external onlyOwner {
+        oracle = IPriceOracle(newOracle);
+        emit OracleUpdated(newOracle);
     }
 }
-// 
-End
-// 
